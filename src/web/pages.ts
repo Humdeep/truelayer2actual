@@ -205,34 +205,10 @@ function targetLine(
     `<select name="${escapeHtml(fieldName)}" aria-label="${escapeHtml(ariaLabel)}">${optionsHtml}</select></label>`;
 }
 
+import { renderPendingControls } from '../pending.js';
+
 function fieldName(truelayerAccountId: string, budgetId: string): string {
   return `map_${truelayerAccountId}__${budgetId}`;
-}
-
-function pendingFieldName(truelayerAccountId: string): string {
-  return `pending_${truelayerAccountId}`;
-}
-
-const PENDING_OPTIONS: { value: PendingMode; label: string }[] = [
-  { value: 'off', label: 'Off (booked only)' },
-  { value: 'deterministic', label: 'Deterministic (exact ID)' },
-  { value: 'heuristic', label: 'Heuristic (amount & date)' },
-];
-
-function renderPendingSelect(
-  truelayerAccountId: string,
-  accountName: string,
-  current: PendingMode = 'off'
-): string {
-  const opts = PENDING_OPTIONS.map(
-    (o) =>
-      `<option value="${escapeHtml(o.value)}"${o.value === current ? ' selected' : ''}>` +
-      `${escapeHtml(o.label)}</option>`
-  ).join('');
-  return (
-    `<select name="${escapeHtml(pendingFieldName(truelayerAccountId))}" ` +
-    `aria-label="${escapeHtml(`Pending transactions for ${accountName}`)}">${opts}</select>`
-  );
 }
 
 /** One select per loaded budget, listing only that budget's accounts. */
@@ -292,7 +268,7 @@ export function pairingPage(options: PairingPageOptions): string {
         .map((ba) => renderLoadedTarget(item.truelayerAccountId, ba, undefined, showLabel))
         .join('');
       const pendingCell = lines
-        ? renderPendingSelect(item.truelayerAccountId, item.name)
+        ? renderPendingControls(item.truelayerAccountId, item.name)
         : '<span class="muted">—</span>';
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
@@ -384,7 +360,7 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
           )
           .join('');
       const pendingCell = lines
-        ? renderPendingSelect(row.truelayerAccountId, row.name, row.pendingSync ?? 'off')
+        ? renderPendingControls(row.truelayerAccountId, row.name, row.pendingSync ?? 'off')
         : '<span class="muted">—</span>';
 
       return `<tr>

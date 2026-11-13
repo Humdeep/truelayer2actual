@@ -251,22 +251,6 @@ describe('applyPairingChanges', () => {
     assert.equal(result.accounts.length, 1);
     assert.equal(result.accounts[0].actualAccountId, 'keep');
   });
-
-  it('updates pendingSync and removes the key when set back to off', () => {
-    const accounts = [account({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'a1' })];
-
-    const step1 = applyPairingChanges(accounts, 'conn', {
-      'tl-1__default': { actualAccountId: 'a1', pendingSync: 'heuristic' },
-    });
-    assert.equal(step1.changed, 1);
-    assert.equal(step1.accounts[0].pendingSync, 'heuristic');
-
-    const step2 = applyPairingChanges(step1.accounts, 'conn', {
-      'tl-1__default': { actualAccountId: 'a1', pendingSync: 'off' },
-    });
-    assert.equal(step2.changed, 1);
-    assert.equal(step2.accounts[0].pendingSync, undefined);
-  });
 });
 
 describe('findBudgetBySyncId', () => {

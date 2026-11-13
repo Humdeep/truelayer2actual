@@ -104,25 +104,8 @@ export function parseTargetFields(body: Record<string, unknown> | undefined): Ma
   return out;
 }
 
-/**
- * Parse `pending_<truelayerAccountId>` form fields into valid PendingMode values.
- */
-export function parsePendingFields(
-  body: Record<string, unknown> | undefined
-): Map<string, PendingMode> {
-  const out = new Map<string, PendingMode>();
-  for (const key of Object.keys(body ?? {})) {
-    if (!key.startsWith('pending_')) continue;
-    const truelayerAccountId = key.slice('pending_'.length);
-    if (!truelayerAccountId) continue;
-    const raw = (body as Record<string, unknown>)[key];
-    const val = typeof raw === 'string' ? raw.trim() : '';
-    if (isPendingMode(val)) {
-      out.set(truelayerAccountId, val);
-    }
-  }
-  return out;
-}
+import { parsePendingFields } from '../pending.js';
+export { parsePendingFields };
 
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();

@@ -1,0 +1,68 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # Check daily at 04:00 UTC for new commits on jasmucrai/truelayer2actual
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  attestations: write
+  id-token: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.merge.outputs.updated }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Check and merge upstream changes
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch https://github.com/jasmucrai/truelayer2actual.git main
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "Already up to date with jasmucrai/truelayer2actual main."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Merging new commits from jasmucrai/truelayer2actual main..."
+            git merge FETCH_HEAD --no-edit
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        if: steps.merge.outputs.updated == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.merge.outputs.updated == 'true'
+        run: npm ci
+
+      - name: Run tests
+        if: steps.merge.outputs.updated == 'true'
+        run: npm test
+
+      - name: Verify build
+        if: steps.merge.outputs.updated == 'true'
+        run: npm run build
+
+      - name: Push merged main
+        if: steps.merge.outputs.updated == 'true'
+        run: git push origin HEAD:main
+
+  publish:
+    needs: sync
+    if: needs.sync.outputs.updated == 'true'
+    uses: ./.github/workflows/publish.yml

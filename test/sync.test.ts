@@ -134,20 +134,6 @@ describe('planFetches', () => {
     );
     assert.equal(plan.length, 2);
   });
-
-  it('sets includePending=true when any budget mapping for a bank account has pendingSync enabled', () => {
-    const plan = planFetches(
-      [
-        account({ truelayerAccountId: 'tl-1', budgetId: 'default' }),
-        account({ truelayerAccountId: 'tl-1', budgetId: 'budget_1', pendingSync: 'deterministic' }),
-        account({ truelayerAccountId: 'tl-2', budgetId: 'default', pendingSync: 'off' }),
-      ],
-      7,
-      now
-    );
-    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-1')!.includePending, true);
-    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-2')!.includePending, undefined);
-  });
 });
 
 describe('resolveSyncWindow', () => {

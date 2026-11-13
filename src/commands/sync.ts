@@ -12,8 +12,6 @@ import {
 import {
   fetchTransactions,
   fetchCardTransactions,
-  fetchPendingTransactions,
-  fetchCardPendingTransactions,
   fetchBalance,
   fetchCardBalance,
   getMe,
@@ -32,12 +30,12 @@ import {
   setActualImportedId,
   deleteActualTransaction,
 } from '../clients/actual.js';
+import { mapTransaction, planImportedIdMigrations } from '../mapper.js';
 import {
-  mapTransaction,
-  planImportedIdMigrations,
   filterPendingTransactions,
-  planPendingReconciliation,
-} from '../mapper.js';
+  fetchPendingForPlanItem,
+  reconcilePendingInActual,
+} from '../pending.js';
 import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
@@ -92,24 +90,10 @@ async function migrateImportedIds(
         `[${label}] Moved ${plan.length} existing transaction(s) to TrueLayer's stable ID`
       );
     }
-
-    const mode = pendingModeOf(account);
-    const pendingPlan = planPendingReconciliation({
-      bookedTxns: txns,
-      pendingTxns,
-      existing,
-      mode,
-      isCard: account.accountKind === 'card',
-      canPrune: mode === 'off' ? true : pendingFetched,
+    await reconcilePendingInActual(account, label, txns, pendingTxns, pendingFetched, existing, {
+      setActualImportedId,
+      deleteActualTransaction,
     });
-    for (const m of pendingPlan.promotions) await setActualImportedId(m.id, m.imported_id);
-    for (const id of pendingPlan.deletions) await deleteActualTransaction(id);
-    if (pendingPlan.promotions.length > 0 || pendingPlan.deletions.length > 0) {
-      logger.info(
-        `[${label}] Reconciled pending transactions: ` +
-          `${pendingPlan.promotions.length} promoted, ${pendingPlan.deletions.length} removed`
-      );
-    }
   } catch (err) {
     logger.warn(
       `[${label}] Could not migrate imported IDs (import continues):`,
@@ -434,22 +418,7 @@ async function executeFetchPlan(
     }
     logger.info(`[${item.name}] Fetched ${txns.length} transaction(s)`);
 
-    let pendingTxns: TrueLayerTransaction[] = [];
-    let pendingFetched = false;
-    if (item.includePending) {
-      try {
-        pendingTxns = isCard
-          ? await fetchCardPendingTransactions(accessToken, item.truelayerAccountId, item.from, item.to)
-          : await fetchPendingTransactions(accessToken, item.truelayerAccountId, item.from, item.to);
-        pendingFetched = true;
-        logger.info(`[${item.name}] Fetched ${pendingTxns.length} pending transaction(s)`);
-      } catch (err) {
-        logger.warn(
-          `[${item.name}] Could not fetch pending transactions (continuing with booked only):`,
-          describeError(err)
-        );
-      }
-    }
+    const { pendingTxns, pendingFetched } = await fetchPendingForPlanItem(accessToken, item);
 
     let balance: TrueLayerBalance | undefined;
     try {
