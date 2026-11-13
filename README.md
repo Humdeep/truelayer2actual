@@ -211,7 +211,7 @@ In the CLI, you are asked after each pairing whether to also sync it into anothe
 
 #### Pending transactions (per-account)
 
-On the pairing page and under **Edit pairings**, each bank account has a **Pending** mode selector (`pendingSync` in `data/config.json`):
+On the pairing page and under **Edit pairings**, each bank account has a **Pending** mode selector (stored in `data/pending.json`):
 
 - **Off (booked only)** *(default)* — fetches only settled (`/transactions`) transactions.
 - **Deterministic (exact ID)** — also imports `/transactions/pending` into Actual as uncleared (`cleared: false`) with a `pending:<id>` prefix. When a transaction settles with the same ID (`normalised_provider_transaction_id` or `transaction_id`), the existing Actual entry is promoted in place (preserving your category/notes) and marked cleared. Any pending row that disappears without an exact ID match is deleted so the newly booked entry imports cleanly without duplicates.

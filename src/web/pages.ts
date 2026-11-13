@@ -1,5 +1,5 @@
 import type { ActualAccount } from '../clients/actual.js';
-import type { Budget, PendingMode } from '../config.js';
+import type { Budget } from '../config.js';
 import type { PairingItem } from './oauth.js';
 
 export function escapeHtml(value: string): string {
@@ -205,8 +205,6 @@ function targetLine(
     `<select name="${escapeHtml(fieldName)}" aria-label="${escapeHtml(ariaLabel)}">${optionsHtml}</select></label>`;
 }
 
-import { renderPendingControls } from '../pending.js';
-
 function fieldName(truelayerAccountId: string, budgetId: string): string {
   return `map_${truelayerAccountId}__${budgetId}`;
 }
@@ -267,13 +265,9 @@ export function pairingPage(options: PairingPageOptions): string {
       const lines = options.budgetAccounts
         .map((ba) => renderLoadedTarget(item.truelayerAccountId, ba, undefined, showLabel))
         .join('');
-      const pendingCell = lines
-        ? renderPendingControls(item.truelayerAccountId, item.name)
-        : '<span class="muted">—</span>';
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
         <td><div class="targets">${lines || '<span class="muted">No budgets available</span>'}</div></td>
-        <td>${pendingCell}</td>
       </tr>`;
     })
     .join('');
@@ -292,7 +286,7 @@ export function pairingPage(options: PairingPageOptions): string {
      <form method="post" action="/pair">
        <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
        <table>
-         <thead><tr><th>TrueLayer</th><th>Actual account</th><th>Pending</th></tr></thead>
+         <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>
        <div class="row"><button class="primary" type="submit">Save pairings</button></div>
@@ -317,7 +311,6 @@ export interface PairingRow {
   currency: string;
   /** Current mappings: budget id -> Actual account id. Empty means unmapped. */
   targets: Record<string, string>;
-  pendingSync?: PendingMode;
 }
 
 export interface EditPairingsPageOptions {
@@ -359,14 +352,10 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
             renderUnavailableTarget(row.truelayerAccountId, budgetId, current, configuredName.get(budgetId))
           )
           .join('');
-      const pendingCell = lines
-        ? renderPendingControls(row.truelayerAccountId, row.name, row.pendingSync ?? 'off')
-        : '<span class="muted">—</span>';
 
       return `<tr>
         <td>${escapeHtml(row.name)}<div class="muted">${escapeHtml(row.currency)} &middot; ${escapeHtml(kind)}</div></td>
         <td><div class="targets">${lines || '<span class="muted">No budgets available</span>'}</div></td>
-        <td>${pendingCell}</td>
       </tr>`;
     })
     .join('');
@@ -390,7 +379,7 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
          ? `<form method="post" action="/connections/${encodeURIComponent(options.connectionId)}/pairings">
               <p>Choose which Actual account each bank account should sync into in each budget. Leave anything you don't want to import as “not synced”, or choose “remove” to stop syncing it. Changes apply on the next sync.</p>
               <table>
-                <thead><tr><th>TrueLayer</th><th>Actual account</th><th>Pending</th></tr></thead>
+                <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
               <div class="row"><button class="primary" type="submit">Save pairings</button></div>

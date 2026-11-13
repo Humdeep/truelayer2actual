@@ -1,5 +1,8 @@
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { createRequire } from 'module';
 
 // Mock @actual-app/api before importing modules that transitively load it.
@@ -28,17 +31,20 @@ try {
 const { mapTransaction } = await import('../src/mapper.js');
 const {
   pendingImportedIdFor,
+  stampPendingTransactions,
   filterPendingTransactions,
   planPendingReconciliation,
   renderPendingControls,
   parsePendingFields,
+  injectPendingColumnHtml,
+  setPendingPathForTests,
+  loadPendingModes,
+  updatePendingModes,
+  pendingModeOf,
 } = await import('../src/pending.js');
-const { applyPairingChanges } = await import('../src/config.js');
-const { planFetches } = await import('../src/commands/sync.js');
 const { pairingPage, editPairingsPage } = await import('../src/web/pages.js');
 
 import type { TrueLayerTransaction } from '../src/clients/truelayer.js';
-import type { Account } from '../src/config.js';
 
 function makeTransaction(
   overrides: Partial<TrueLayerTransaction> = {}
@@ -55,28 +61,16 @@ function makeTransaction(
   };
 }
 
-function makeAccount(overrides: Partial<Account> = {}): Account {
-  return {
-    name: 'Acct',
-    connectionId: 'conn',
-    budgetId: 'default',
-    accountKind: 'account',
-    truelayerAccountId: 'tl-1',
-    actualAccountId: 'actual-1',
-    currency: 'GBP',
-    ...overrides,
-  };
-}
-
-describe('pending transactions (prefix, filtering, reconciliation)', () => {
-  it('prefixes imported_id with pending: when status is pending', () => {
-    const t = makeTransaction({
+describe('pending transactions (stamping, filtering, reconciliation)', () => {
+  it('stamps pending transactions so unmodified mapTransaction produces pending: imported_id and cleared=false', () => {
+    const raw = makeTransaction({
       transaction_id: 'tl-99',
       normalised_provider_transaction_id: 'stable-99',
-      status: 'pending',
     });
-    assert.equal(pendingImportedIdFor(t), 'pending:stable-99');
-    const mapped = mapTransaction(t);
+    assert.equal(pendingImportedIdFor(raw), 'pending:stable-99');
+
+    const [stamped] = stampPendingTransactions([raw]);
+    const mapped = mapTransaction(stamped);
     assert.equal(mapped.imported_id, 'pending:stable-99');
     assert.equal(mapped.cleared, false);
   });
@@ -191,39 +185,34 @@ describe('pending transactions (prefix, filtering, reconciliation)', () => {
   });
 });
 
-describe('pending config, sync planning, and UI controls', () => {
-  it('updates pendingSync and removes the key when set back to off', () => {
-    const accounts = [makeAccount({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'a1' })];
+describe('pending sidecar storage and HTML middleware injection', () => {
+  let tmpDir: string;
 
-    const step1 = applyPairingChanges(accounts, 'conn', {
-      'tl-1__default': { actualAccountId: 'a1', pendingSync: 'heuristic' },
-    });
-    assert.equal(step1.changed, 1);
-    assert.equal(step1.accounts[0].pendingSync, 'heuristic');
-
-    const step2 = applyPairingChanges(step1.accounts, 'conn', {
-      'tl-1__default': { actualAccountId: 'a1', pendingSync: 'off' },
-    });
-    assert.equal(step2.changed, 1);
-    assert.equal(step2.accounts[0].pendingSync, undefined);
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tl2a-pending-'));
+    setPendingPathForTests(path.join(tmpDir, 'pending.json'));
   });
 
-  it('sets includePending=true in planFetches when any mapping for a bank account has pendingSync enabled', () => {
-    const now = Date.parse('2026-06-15T12:00:00Z');
-    const plan = planFetches(
-      [
-        makeAccount({ truelayerAccountId: 'tl-1', budgetId: 'default' }),
-        makeAccount({ truelayerAccountId: 'tl-1', budgetId: 'budget_1', pendingSync: 'deterministic' }),
-        makeAccount({ truelayerAccountId: 'tl-2', budgetId: 'default', pendingSync: 'off' }),
-      ],
-      7,
-      now
-    );
-    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-1')!.includePending, true);
-    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-2')!.includePending, undefined);
+  afterEach(() => {
+    setPendingPathForTests(undefined);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('parses pending_<tl> form fields and renders radio controls without adding <select> elements', () => {
+  it('persists per-account pending modes in data/pending.json and cleans up off entries', async () => {
+    assert.deepEqual(loadPendingModes(), {});
+    assert.equal(pendingModeOf('tl1'), 'off');
+
+    const modes1 = await updatePendingModes(new Map([['tl1', 'heuristic']]));
+    assert.deepEqual(modes1, { tl1: 'heuristic' });
+    assert.equal(pendingModeOf('tl1'), 'heuristic');
+
+    const modes2 = await updatePendingModes(new Map([['tl1', 'off']]));
+    assert.deepEqual(modes2, {});
+    assert.equal(pendingModeOf('tl1'), 'off');
+    assert.deepEqual(loadPendingModes(), {});
+  });
+
+  it('parses pending_<tl> form fields and injects radio controls into pairingPage and editPairingsPage without adding <select> elements', async () => {
     assert.deepEqual(
       [...parsePendingFields({ pending_tl1: 'heuristic', pending_tl2: 'invalid', pending_: 'off' }).entries()],
       [['tl1', 'heuristic']]
@@ -233,35 +222,42 @@ describe('pending config, sync planning, and UI controls', () => {
     assert.equal(html.includes('<select'), false);
     assert.match(html, /name="pending_tl1" value="deterministic" checked/);
 
+    await updatePendingModes(new Map([['tl1', 'heuristic']]));
+
     const budgetAccounts = [
       {
         budget: { id: 'b1', name: 'Personal', syncId: 's1' },
         accounts: [{ id: 'a1', name: 'Current', offbudget: false, closed: false }],
       },
     ];
-    const editHtml = editPairingsPage({
-      connectionId: 'conn_1',
-      provider: 'Monzo',
-      budgetAccounts,
-      rows: [
-        {
-          truelayerAccountId: 'tl1',
-          name: 'Bank',
-          accountKind: 'account',
-          currency: 'GBP',
-          targets: { b1: 'a1' },
-          pendingSync: 'heuristic',
-        },
-      ],
-    });
+    const editHtml = injectPendingColumnHtml(
+      editPairingsPage({
+        connectionId: 'conn_1',
+        provider: 'Monzo',
+        budgetAccounts,
+        rows: [
+          {
+            truelayerAccountId: 'tl1',
+            name: 'Bank',
+            accountKind: 'account',
+            currency: 'GBP',
+            targets: { b1: 'a1' },
+          },
+        ],
+      })
+    );
+    assert.match(editHtml, /<th>Pending<\/th>/);
     assert.match(editHtml, /name="pending_tl1" value="heuristic" checked/);
 
-    const pairHtml = pairingPage({
-      pairingId: 'p1',
-      provider: 'Monzo',
-      budgetAccounts,
-      items: [{ truelayerAccountId: 'tl1', name: 'Bank', accountKind: 'account', currency: 'GBP' }],
-    });
-    assert.match(pairHtml, /name="pending_tl1" value="off" checked/);
+    const pairHtml = injectPendingColumnHtml(
+      pairingPage({
+        pairingId: 'p1',
+        provider: 'Monzo',
+        budgetAccounts,
+        items: [{ truelayerAccountId: 'tl2', name: 'Card', accountKind: 'card', currency: 'GBP' }],
+      })
+    );
+    assert.match(pairHtml, /<th>Pending<\/th>/);
+    assert.match(pairHtml, /name="pending_tl2" value="off" checked/);
   });
 });

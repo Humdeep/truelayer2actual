@@ -21,8 +21,6 @@ export function importedIdFor(t: TrueLayerTransaction): string {
 export interface ExistingImport {
   id: string;
   imported_id?: string | null;
-  date?: string;
-  amount?: number;
 }
 
 export interface ImportedIdMigration {
@@ -80,15 +78,13 @@ export function mapTransaction(t: TrueLayerTransaction, isCard = false): ActualT
 
   // Status is 'booked' | 'pending' when present; anything else counts as cleared.
   const cleared = t.status === undefined ? true : t.status === 'booked';
-  const imported_id = t.status === 'pending' ? `pending:${importedIdFor(t)}` : importedIdFor(t);
 
   return {
     date,
     amount,
     payee_name,
     notes: t.description,
-    imported_id,
+    imported_id: importedIdFor(t),
     cleared,
   };
 }
-

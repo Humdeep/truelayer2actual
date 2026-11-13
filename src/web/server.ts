@@ -24,13 +24,10 @@ import {
   listBudgets,
   addBudget,
   generateBudgetId,
-  isPendingMode,
-  pendingModeOf,
   type Account,
   type Budget,
   type Config,
   type PairingChange,
-  type PendingMode,
   duplicateSyncIdGroups,
   DuplicateSyncIdError,
 } from '../config.js';
@@ -61,6 +58,7 @@ import {
 } from './pages.js';
 import { withStateLock } from '../util/lock.js';
 import { logger } from '../logger.js';
+import { installPendingMiddleware } from '../pending.js';
 
 function asyncHandler(
   fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>
@@ -103,9 +101,6 @@ export function parseTargetFields(body: Record<string, unknown> | undefined): Ma
   }
   return out;
 }
-
-import { parsePendingFields } from '../pending.js';
-export { parsePendingFields };
 
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();
@@ -311,8 +306,6 @@ async function loadPairingRows(
   }
   const targetsOf = (tlId: string): Record<string, string> =>
     Object.fromEntries((savedByTlId.get(tlId) ?? []).map((a) => [a.budgetId, a.actualAccountId]));
-  const pendingOf = (tlId: string): PendingMode | undefined =>
-    savedByTlId.get(tlId)?.find((a) => a.pendingSync)?.pendingSync;
 
   const live = await fetchLivePairingItems(connectionId);
   const items = live.items ?? [];
@@ -322,23 +315,16 @@ async function loadPairingRows(
   const seen = new Set<string>();
   for (const item of items) {
     seen.add(item.truelayerAccountId);
-    const pendingSync = pendingOf(item.truelayerAccountId);
-    rows.push({
-      ...item,
-      targets: targetsOf(item.truelayerAccountId),
-      ...(pendingSync ? { pendingSync } : {}),
-    });
+    rows.push({ ...item, targets: targetsOf(item.truelayerAccountId) });
   }
   for (const [tlId, saved] of savedByTlId) {
     if (seen.has(tlId)) continue;
-    const pendingSync = pendingOf(tlId);
     rows.push({
       truelayerAccountId: tlId,
       name: saved[0].name,
       accountKind: saved[0].accountKind,
       currency: saved[0].currency,
       targets: targetsOf(tlId),
-      ...(pendingSync ? { pendingSync } : {}),
     });
   }
 
@@ -458,6 +444,8 @@ export function createApp(): Express {
     }
     next();
   });
+
+  installPendingMiddleware(app);
 
   app.get(
     '/',
@@ -661,10 +649,9 @@ export function createApp(): Express {
         return;
       }
 
-      // Only `map_<tlId>__<budgetId>` and `pending_<tlId>` keys count; a field
-      // that is absent leaves that mapping untouched.
+      // Only `map_<tlId>__<budgetId>` keys count; a field that is absent
+      // leaves that mapping untouched.
       const submitted = parseTargetFields(req.body);
-      const pendingByTlId = parsePendingFields(req.body);
 
       // Pairing a bank account with no mapping yet needs TrueLayer to vouch for
       // it. Fetch outside the state lock: the token refresh takes that lock itself.
@@ -715,22 +702,15 @@ export function createApp(): Express {
 
           for (const [key, row] of submitted) {
             const existing = existingByKey.get(key);
-            const nextPending = pendingByTlId.get(row.truelayerAccountId);
 
             if (existing) {
-              // Blank removes; a different target or pending mode changes; the same is a no-op.
-              const accountChanged = row.actualAccountId !== existing.actualAccountId;
-              const pendingChanged =
-                nextPending !== undefined && nextPending !== pendingModeOf(existing);
-              if (accountChanged || pendingChanged) {
-                if (accountChanged && row.actualAccountId && !budgetIds.has(row.budgetId)) {
+              // Blank removes; a different target changes; the same is a no-op.
+              if (row.actualAccountId !== existing.actualAccountId) {
+                if (row.actualAccountId && !budgetIds.has(row.budgetId)) {
                   ignored++;
                   continue;
                 }
-                changes[key] = {
-                  actualAccountId: row.actualAccountId,
-                  ...(nextPending !== undefined ? { pendingSync: nextPending } : {}),
-                };
+                changes[key] = { actualAccountId: row.actualAccountId };
               }
               continue;
             }
@@ -751,7 +731,6 @@ export function createApp(): Express {
               ignored++;
               continue;
             }
-            const pendingSync = nextPending ?? sibling?.pendingSync;
             newAccounts.push({
               name: item.name,
               connectionId,
@@ -760,20 +739,7 @@ export function createApp(): Express {
               truelayerAccountId: row.truelayerAccountId,
               actualAccountId: row.actualAccountId,
               currency: item.currency,
-              ...(pendingSync && pendingSync !== 'off' ? { pendingSync } : {}),
             });
-          }
-
-          for (const existing of mine) {
-            const key = mappingKey(existing);
-            if (submitted.has(key)) continue;
-            const nextPending = pendingByTlId.get(existing.truelayerAccountId);
-            if (nextPending !== undefined && nextPending !== pendingModeOf(existing)) {
-              changes[key] = {
-                actualAccountId: existing.actualAccountId,
-                pendingSync: nextPending,
-              };
-            }
           }
 
           const result = applyPairingChanges(config.accounts, connectionId, changes);
@@ -865,14 +831,11 @@ export function createApp(): Express {
 
       const selections: Record<string, PairingSelection[]> = {};
       const sessionIds = new Set(session.items.map((i) => i.truelayerAccountId));
-      const pendingByTlId = parsePendingFields(req.body);
       for (const field of parseTargetFields(req.body).values()) {
         if (!field.actualAccountId || !sessionIds.has(field.truelayerAccountId)) continue;
-        const pendingSync = pendingByTlId.get(field.truelayerAccountId);
         (selections[field.truelayerAccountId] ??= []).push({
           budgetId: field.budgetId,
           actualAccountId: field.actualAccountId,
-          ...(pendingSync ? { pendingSync } : {}),
         });
       }
 

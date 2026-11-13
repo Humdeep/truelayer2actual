@@ -24,7 +24,6 @@ import {
   type Config,
   budgetFromEnv,
   type Account,
-  type PendingMode,
 } from '../config.js';
 import { withStateLock } from '../util/lock.js';
 import { logger } from '../logger.js';
@@ -394,7 +393,6 @@ export interface SavePairingsResult {
 export interface PairingSelection {
   budgetId: string;
   actualAccountId: string;
-  pendingSync?: PendingMode;
 }
 
 export async function savePairings(
@@ -457,9 +455,6 @@ export async function savePairings(
           truelayerAccountId: item.truelayerAccountId,
           actualAccountId: selection.actualAccountId,
           currency: item.currency,
-          ...(selection.pendingSync && selection.pendingSync !== 'off'
-            ? { pendingSync: selection.pendingSync }
-            : {}),
         });
       }
     }
