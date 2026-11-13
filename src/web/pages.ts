@@ -209,6 +209,32 @@ function fieldName(truelayerAccountId: string, budgetId: string): string {
   return `map_${truelayerAccountId}__${budgetId}`;
 }
 
+function pendingFieldName(truelayerAccountId: string): string {
+  return `pending_${truelayerAccountId}`;
+}
+
+const PENDING_OPTIONS: { value: PendingMode; label: string }[] = [
+  { value: 'off', label: 'Off (booked only)' },
+  { value: 'deterministic', label: 'Deterministic (exact ID)' },
+  { value: 'heuristic', label: 'Heuristic (amount & date)' },
+];
+
+function renderPendingSelect(
+  truelayerAccountId: string,
+  accountName: string,
+  current: PendingMode = 'off'
+): string {
+  const opts = PENDING_OPTIONS.map(
+    (o) =>
+      `<option value="${escapeHtml(o.value)}"${o.value === current ? ' selected' : ''}>` +
+      `${escapeHtml(o.label)}</option>`
+  ).join('');
+  return (
+    `<select name="${escapeHtml(pendingFieldName(truelayerAccountId))}" ` +
+    `aria-label="${escapeHtml(`Pending transactions for ${accountName}`)}">${opts}</select>`
+  );
+}
+
 /** One select per loaded budget, listing only that budget's accounts. */
 function renderLoadedTarget(
   truelayerAccountId: string,
@@ -265,9 +291,13 @@ export function pairingPage(options: PairingPageOptions): string {
       const lines = options.budgetAccounts
         .map((ba) => renderLoadedTarget(item.truelayerAccountId, ba, undefined, showLabel))
         .join('');
+      const pendingCell = lines
+        ? renderPendingSelect(item.truelayerAccountId, item.name)
+        : '<span class="muted">—</span>';
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
         <td><div class="targets">${lines || '<span class="muted">No budgets available</span>'}</div></td>
+        <td>${pendingCell}</td>
       </tr>`;
     })
     .join('');
@@ -286,7 +316,7 @@ export function pairingPage(options: PairingPageOptions): string {
      <form method="post" action="/pair">
        <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
        <table>
-         <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
+         <thead><tr><th>TrueLayer</th><th>Actual account</th><th>Pending</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>
        <div class="row"><button class="primary" type="submit">Save pairings</button></div>
@@ -311,6 +341,7 @@ export interface PairingRow {
   currency: string;
   /** Current mappings: budget id -> Actual account id. Empty means unmapped. */
   targets: Record<string, string>;
+  pendingSync?: PendingMode;
 }
 
 export interface EditPairingsPageOptions {
@@ -352,10 +383,14 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
             renderUnavailableTarget(row.truelayerAccountId, budgetId, current, configuredName.get(budgetId))
           )
           .join('');
+      const pendingCell = lines
+        ? renderPendingSelect(row.truelayerAccountId, row.name, row.pendingSync ?? 'off')
+        : '<span class="muted">—</span>';
 
       return `<tr>
         <td>${escapeHtml(row.name)}<div class="muted">${escapeHtml(row.currency)} &middot; ${escapeHtml(kind)}</div></td>
         <td><div class="targets">${lines || '<span class="muted">No budgets available</span>'}</div></td>
+        <td>${pendingCell}</td>
       </tr>`;
     })
     .join('');
@@ -379,7 +414,7 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
          ? `<form method="post" action="/connections/${encodeURIComponent(options.connectionId)}/pairings">
               <p>Choose which Actual account each bank account should sync into in each budget. Leave anything you don't want to import as “not synced”, or choose “remove” to stop syncing it. Changes apply on the next sync.</p>
               <table>
-                <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
+                <thead><tr><th>TrueLayer</th><th>Actual account</th><th>Pending</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
               <div class="row"><button class="primary" type="submit">Save pairings</button></div>

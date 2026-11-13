@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'url';
-import { loadConfig, updateConfig, reauthWarnDays, mappingKey } from '../config.js';
+import { loadConfig, updateConfig, reauthWarnDays, mappingKey, pendingModeOf } from '../config.js';
 import {
   loadConnection,
   refreshConnectionIfNeeded,
@@ -12,6 +12,8 @@ import {
 import {
   fetchTransactions,
   fetchCardTransactions,
+  fetchPendingTransactions,
+  fetchCardPendingTransactions,
   fetchBalance,
   fetchCardBalance,
   getMe,
@@ -28,8 +30,14 @@ import {
   getActualAccountBalance,
   getActualImportedIds,
   setActualImportedId,
+  deleteActualTransaction,
 } from '../clients/actual.js';
-import { mapTransaction, planImportedIdMigrations } from '../mapper.js';
+import {
+  mapTransaction,
+  planImportedIdMigrations,
+  filterPendingTransactions,
+  planPendingReconciliation,
+} from '../mapper.js';
 import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
@@ -57,18 +65,21 @@ function shiftDate(date: string, days: number): string {
 
 /**
  * Move rows already in Actual under TrueLayer's old transaction_id onto the
- * stable ID, so the import below matches them instead of adding duplicates.
- * Best-effort: on failure, log and import anyway.
+ * stable ID, and reconcile `pending:*` rows (promoting settled ones and
+ * deleting vanished holds) so the import below matches them instead of adding
+ * duplicates. Best-effort: on failure, log and import anyway.
  */
 async function migrateImportedIds(
   account: Account,
   label: string,
   txns: Parameters<typeof planImportedIdMigrations>[0],
+  pendingTxns: TrueLayerTransaction[],
+  pendingFetched: boolean,
   from: string,
   to: string
 ): Promise<void> {
   try {
-    // Widen the window a little: an amended transaction can shift date.
+    // Widen the window a little: an amended or settling transaction can shift date.
     const existing = await getActualImportedIds(
       account.actualAccountId,
       shiftDate(from, -7),
@@ -79,6 +90,24 @@ async function migrateImportedIds(
     if (plan.length > 0) {
       logger.info(
         `[${label}] Moved ${plan.length} existing transaction(s) to TrueLayer's stable ID`
+      );
+    }
+
+    const mode = pendingModeOf(account);
+    const pendingPlan = planPendingReconciliation({
+      bookedTxns: txns,
+      pendingTxns,
+      existing,
+      mode,
+      isCard: account.accountKind === 'card',
+      canPrune: mode === 'off' ? true : pendingFetched,
+    });
+    for (const m of pendingPlan.promotions) await setActualImportedId(m.id, m.imported_id);
+    for (const id of pendingPlan.deletions) await deleteActualTransaction(id);
+    if (pendingPlan.promotions.length > 0 || pendingPlan.deletions.length > 0) {
+      logger.info(
+        `[${label}] Reconciled pending transactions: ` +
+          `${pendingPlan.promotions.length} promoted, ${pendingPlan.deletions.length} removed`
       );
     }
   } catch (err) {
@@ -325,7 +354,12 @@ export async function runSync(): Promise<SyncSummary> {
 
 /** What one TrueLayer account fetch produced, shared by all of its mappings. */
 export type FetchResult =
-  | { txns: TrueLayerTransaction[]; balance?: TrueLayerBalance }
+  | {
+      txns: TrueLayerTransaction[];
+      pendingTxns?: TrueLayerTransaction[];
+      pendingFetched?: boolean;
+      balance?: TrueLayerBalance;
+    }
   | { error: string };
 
 export function fetchKey(a: { connectionId: string; truelayerAccountId: string }): string {
@@ -341,6 +375,8 @@ export interface FetchPlanItem {
   /** Earliest `from` across every mapping of this bank account. */
   from: string;
   to: string;
+  /** True when at least one mapping of this bank account has pending sync enabled. */
+  includePending?: boolean;
 }
 
 /**
@@ -356,6 +392,7 @@ export function planFetches(
   const plan = new Map<string, FetchPlanItem>();
   for (const account of accounts) {
     const { from, to } = resolveSyncWindow(account.lastSyncedAt, lookbackDays, nowMs);
+    const wantsPending = pendingModeOf(account) !== 'off';
     const key = fetchKey(account);
     const existing = plan.get(key);
     if (!existing) {
@@ -366,9 +403,11 @@ export function planFetches(
         name: account.name,
         from,
         to,
+        ...(wantsPending ? { includePending: true } : {}),
       });
-    } else if (from < existing.from) {
-      existing.from = from;
+    } else {
+      if (from < existing.from) existing.from = from;
+      if (wantsPending) existing.includePending = true;
     }
   }
   return [...plan.values()];
@@ -395,6 +434,23 @@ async function executeFetchPlan(
     }
     logger.info(`[${item.name}] Fetched ${txns.length} transaction(s)`);
 
+    let pendingTxns: TrueLayerTransaction[] = [];
+    let pendingFetched = false;
+    if (item.includePending) {
+      try {
+        pendingTxns = isCard
+          ? await fetchCardPendingTransactions(accessToken, item.truelayerAccountId, item.from, item.to)
+          : await fetchPendingTransactions(accessToken, item.truelayerAccountId, item.from, item.to);
+        pendingFetched = true;
+        logger.info(`[${item.name}] Fetched ${pendingTxns.length} pending transaction(s)`);
+      } catch (err) {
+        logger.warn(
+          `[${item.name}] Could not fetch pending transactions (continuing with booked only):`,
+          describeError(err)
+        );
+      }
+    }
+
     let balance: TrueLayerBalance | undefined;
     try {
       balance = isCard
@@ -406,7 +462,7 @@ async function executeFetchPlan(
         describeError(err)
       );
     }
-    results.set(key, { txns, balance });
+    results.set(key, { txns, pendingTxns, pendingFetched, balance });
   }
   return results;
 }
@@ -424,13 +480,29 @@ async function syncAccount(
 
     const { from, to } = resolveSyncWindow(account.lastSyncedAt, syncLookbackDays());
     const { txns, balance } = fetched;
+    const pendingMode = pendingModeOf(account);
+    const pendingTxns =
+      pendingMode === 'off' ? [] : filterPendingTransactions(txns, fetched.pendingTxns ?? []);
+    const allTxns = [...txns, ...pendingTxns];
 
-    logger.info(`[${label}] Syncing ${txns.length} transaction(s) (window from ${from})...`);
+    logger.info(
+      `[${label}] Syncing ${txns.length} transaction(s)` +
+        (pendingMode !== 'off' ? ` + ${pendingTxns.length} pending (${pendingMode})` : '') +
+        ` (window from ${from})...`
+    );
 
-    await migrateImportedIds(account, label, txns, from, to);
+    await migrateImportedIds(
+      account,
+      label,
+      txns,
+      pendingTxns,
+      fetched.pendingFetched ?? false,
+      from,
+      to
+    );
 
     const isCard = account.accountKind === 'card';
-    const mapped = txns.map((t) => mapTransaction(t, isCard));
+    const mapped = allTxns.map((t) => mapTransaction(t, isCard));
     const result = await importToActual(account.actualAccountId, mapped);
 
     logger.info(`[${label}] +${result.added.length} added, ${result.updated.length} updated`);

@@ -393,6 +393,7 @@ export interface SavePairingsResult {
 export interface PairingSelection {
   budgetId: string;
   actualAccountId: string;
+  pendingSync?: PendingMode;
 }
 
 export async function savePairings(
@@ -455,6 +456,9 @@ export async function savePairings(
           truelayerAccountId: item.truelayerAccountId,
           actualAccountId: selection.actualAccountId,
           currency: item.currency,
+          ...(selection.pendingSync && selection.pendingSync !== 'off'
+            ? { pendingSync: selection.pendingSync }
+            : {}),
         });
       }
     }

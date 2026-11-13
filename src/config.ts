@@ -16,6 +16,17 @@ const BudgetSchema = z.object({
   encryptionPassword: z.string().optional(),
 });
 
+export const PENDING_MODES = ['off', 'deterministic', 'heuristic'] as const;
+export type PendingMode = (typeof PENDING_MODES)[number];
+
+export function isPendingMode(value: unknown): value is PendingMode {
+  return typeof value === 'string' && (PENDING_MODES as readonly string[]).includes(value);
+}
+
+export function pendingModeOf(account: { pendingSync?: PendingMode }): PendingMode {
+  return account.pendingSync ?? 'off';
+}
+
 const AccountSchema = z.object({
   name: z.string(),
   connectionId: z.string(),
@@ -24,6 +35,7 @@ const AccountSchema = z.object({
   truelayerAccountId: z.string(),
   actualAccountId: z.string(),
   currency: z.string().default('GBP'),
+  pendingSync: z.enum(PENDING_MODES).optional(),
   lastSyncedAt: z.string().optional(),
 });
 
@@ -287,6 +299,7 @@ export function mergeAccounts(existing: Account[], incoming: Account[]): Account
  */
 export interface PairingChange {
   actualAccountId: string;
+  pendingSync?: PendingMode;
 }
 
 export interface ApplyPairingChangesResult {
@@ -329,9 +342,18 @@ export function applyPairingChanges(
       continue;
     }
 
-    if (account.actualAccountId !== change.actualAccountId) {
+    const accountChanged = account.actualAccountId !== change.actualAccountId;
+    const pendingChanged =
+      change.pendingSync !== undefined && change.pendingSync !== pendingModeOf(account);
+
+    if (accountChanged || pendingChanged) {
       changed++;
-      next.push({ ...account, actualAccountId: change.actualAccountId });
+      const updated: Account = { ...account, actualAccountId: change.actualAccountId };
+      if (pendingChanged) {
+        if (change.pendingSync === 'off') delete updated.pendingSync;
+        else updated.pendingSync = change.pendingSync;
+      }
+      next.push(updated);
     } else {
       next.push(account);
     }

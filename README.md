@@ -209,6 +209,14 @@ from TrueLayer once per run per bank account and imported into every budget it i
 Each target keeps its own last-sync time, and the dashboard flags any that have fallen behind.
 In the CLI, you are asked after each pairing whether to also sync it into another budget.
 
+#### Pending transactions (per-account)
+
+On the pairing page and under **Edit pairings**, each bank account has a **Pending** mode selector (`pendingSync` in `data/config.json`):
+
+- **Off (booked only)** *(default)* — fetches only settled (`/transactions`) transactions.
+- **Deterministic (exact ID)** — also imports `/transactions/pending` into Actual as uncleared (`cleared: false`) with a `pending:<id>` prefix. When a transaction settles with the same ID (`normalised_provider_transaction_id` or `transaction_id`), the existing Actual entry is promoted in place (preserving your category/notes) and marked cleared. Any pending row that disappears without an exact ID match is deleted so the newly booked entry imports cleanly without duplicates.
+- **Heuristic (amount + date)** — tries an exact ID match first, then promotes a disappeared pending row in place if there is a single unambiguous newly booked transaction with the exact same amount within `[-1, +7]` days of the pending date. Disappeared pending rows that are unmatched or ambiguous (e.g. two identical amounts in the window) are deleted so the booked transaction imports cleanly.
+
 ### 5. Sync
 
 The built-in scheduler syncs every `SYNC_INTERVAL_HOURS` (default 6). To sync manually,

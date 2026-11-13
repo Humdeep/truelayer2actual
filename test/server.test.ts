@@ -45,7 +45,7 @@ nodeRequire.cache[resolvedApiPath] = {
 process.env.ACTUAL_SERVER_URL ??= 'http://actual.invalid';
 process.env.ACTUAL_PASSWORD ??= 'secret';
 
-const { createApp, hostAllowed, parseTargetFields } = await import('../src/web/server.js');
+const { createApp, hostAllowed, parseTargetFields, parsePendingFields } = await import('../src/web/server.js');
 const { setPairing } = await import('../src/web/oauth.js');
 // Importing the server pulls in dotenv (via sync.ts), so a local .env would
 // otherwise add an env-defined default budget that CI never has.
@@ -886,4 +886,20 @@ describe('edit pairings routes', () => {
     assert.equal(accounts.find((a) => a.connectionId === 'conn_edit')!.actualAccountId, 'a2');
     assert.equal(accounts.find((a) => a.connectionId === 'conn_other')!.actualAccountId, 'a1');
   });
+
+  it('POST updates pendingSync mode for an existing account and removes it when set to off', async () => {
+    assert.deepEqual(
+      [...parsePendingFields({ pending_tl1: 'heuristic', pending_tl2: 'invalid', pending_: 'off' }).entries()],
+      [['tl1', 'heuristic']]
+    );
+
+    const res1 = await post('conn_edit', { map_tl1__b1: 'a1', pending_tl1: 'deterministic' });
+    assert.equal(res1.status, 302);
+    assert.equal(readAccounts().find((a) => a.connectionId === 'conn_edit')!.pendingSync, 'deterministic');
+
+    const res2 = await post('conn_edit', { map_tl1__b1: 'a1', pending_tl1: 'off' });
+    assert.equal(res2.status, 302);
+    assert.equal(readAccounts().find((a) => a.connectionId === 'conn_edit')!.pendingSync, undefined);
+  });
 });
+

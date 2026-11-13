@@ -207,6 +207,61 @@ export async function fetchCardTransactions(
   }
 }
 
+export async function fetchPendingTransactions(
+  accessToken: string,
+  accountId: string,
+  from: string,
+  to: string
+): Promise<TrueLayerTransaction[]> {
+  const url = `${baseUrl()}/data/v1/accounts/${accountId}/transactions/pending`;
+  logger.debug(`Fetching pending transactions for account ${accountId} from ${from} to ${to}`);
+
+  try {
+    const res = await axios.get<TrueLayerResponse<TrueLayerTransaction>>(url, {
+      ...authConfig(accessToken),
+      params: { from, to },
+    });
+    logger.debug(
+      `Fetched ${res.data.results.length} pending transaction(s) for account ${accountId}`
+    );
+    return res.data.results.map((t) => ({ ...t, status: 'pending' }));
+  } catch (err) {
+    if (axios.isAxiosError(err) && (err.response?.status === 404 || err.response?.status === 501)) {
+      logger.debug('Pending transactions endpoint not supported by this provider — skipping');
+      return [];
+    }
+    handleAxiosError(
+      err,
+      `fetchPendingTransactions(accountId=${accountId}, from=${from}, to=${to})`
+    );
+  }
+}
+
+export async function fetchCardPendingTransactions(
+  accessToken: string,
+  cardId: string,
+  from: string,
+  to: string
+): Promise<TrueLayerTransaction[]> {
+  const url = `${baseUrl()}/data/v1/cards/${cardId}/transactions/pending`;
+  logger.debug(`Fetching pending card transactions for ${cardId} from ${from} to ${to}`);
+
+  try {
+    const res = await axios.get<TrueLayerResponse<TrueLayerTransaction>>(url, {
+      ...authConfig(accessToken),
+      params: { from, to },
+    });
+    logger.debug(`Fetched ${res.data.results.length} pending card transaction(s) for ${cardId}`);
+    return res.data.results.map((t) => ({ ...t, status: 'pending' }));
+  } catch (err) {
+    if (axios.isAxiosError(err) && (err.response?.status === 404 || err.response?.status === 501)) {
+      logger.debug('Pending card transactions endpoint not supported by this provider — skipping');
+      return [];
+    }
+    handleAxiosError(err, `fetchCardPendingTransactions(cardId=${cardId}, from=${from}, to=${to})`);
+  }
+}
+
 export async function fetchCardBalance(
   accessToken: string,
   cardId: string

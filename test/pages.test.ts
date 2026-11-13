@@ -374,4 +374,18 @@ describe('editPairingsPage', () => {
     const html = editPairingsPage({ ...editBase, connectionId: 'a/b', rows: [editRow({})] });
     assert.ok(html.includes('action="/connections/a%2Fb/pairings"'));
   });
+
+  it('pre-selects the saved pendingSync mode and defaults to off', () => {
+    const htmlDefault = editPairingsPage({ ...editBase, rows: [editRow({ b1: 'a1' })] });
+    const pendingDefault = htmlDefault.slice(htmlDefault.indexOf('name="pending_tl1"')).split('</select>')[0];
+    assert.match(pendingDefault, /<option value="off" selected>/);
+
+    const htmlHeuristic = editPairingsPage({
+      ...editBase,
+      rows: [editRow({ b1: 'a1' }, { pendingSync: 'heuristic' })],
+    });
+    const pendingHeuristic = htmlHeuristic.slice(htmlHeuristic.indexOf('name="pending_tl1"')).split('</select>')[0];
+    assert.match(pendingHeuristic, /<option value="heuristic" selected>/);
+  });
 });
+
