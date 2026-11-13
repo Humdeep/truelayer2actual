@@ -146,7 +146,7 @@ describe('planFetches', () => {
       now
     );
     assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-1')!.includePending, true);
-    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-2')!.includePending, false);
+    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-2')!.includePending, undefined);
   });
 });
 

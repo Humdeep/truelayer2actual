@@ -24,6 +24,7 @@ import {
   type Config,
   budgetFromEnv,
   type Account,
+  type PendingMode,
 } from '../config.js';
 import { withStateLock } from '../util/lock.js';
 import { logger } from '../logger.js';

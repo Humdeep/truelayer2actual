@@ -34,7 +34,14 @@ require.cache[resolvedApiPath] = {
 } as unknown as NodeJS.Module;
 
 // Now import mapper — it will receive the mocked @actual-app/api
-const { mapTransaction, importedIdFor, planImportedIdMigrations } = await import('../src/mapper.js');
+const {
+  mapTransaction,
+  importedIdFor,
+  pendingImportedIdFor,
+  filterPendingTransactions,
+  planImportedIdMigrations,
+  planPendingReconciliation,
+} = await import('../src/mapper.js');
 
 import type { TrueLayerTransaction } from '../src/clients/truelayer.js';
 
@@ -308,34 +315,34 @@ describe('pending transactions (prefix, filtering, reconciliation)', () => {
       makeTransaction({ transaction_id: 'b2', status: 'pending' }),
       makeTransaction({ transaction_id: 'p3', status: 'pending' }),
     ];
-    const active = filterPendingTransactions(pending, booked);
+    const active = filterPendingTransactions(booked, pending);
     assert.deepEqual(active.map((t) => t.transaction_id), ['p3']);
   });
 
   it('mode=off deletes all existing pending:* rows when canPrune is true', () => {
-    const plan = planPendingReconciliation(
-      'off',
-      [],
-      [],
-      [
+    const plan = planPendingReconciliation({
+      mode: 'off',
+      bookedTxns: [],
+      pendingTxns: [],
+      existing: [
         { id: 'r1', imported_id: 'pending:p1', date: '2026-06-10', amount: -1000 },
         { id: 'r2', imported_id: 'booked-1', date: '2026-06-10', amount: -1000 },
       ],
-      false,
-      true
-    );
+      isCard: false,
+      canPrune: true,
+    });
     assert.deepEqual(plan, { promotions: [], deletions: ['r1'] });
   });
 
   it('does not delete vanished pending rows when canPrune is false (pending endpoint failed)', () => {
-    const plan = planPendingReconciliation(
-      'deterministic',
-      [],
-      [],
-      [{ id: 'r1', imported_id: 'pending:p1', date: '2026-06-10', amount: -1000 }],
-      false,
-      false
-    );
+    const plan = planPendingReconciliation({
+      mode: 'deterministic',
+      bookedTxns: [],
+      pendingTxns: [],
+      existing: [{ id: 'r1', imported_id: 'pending:p1', date: '2026-06-10', amount: -1000 }],
+      isCard: false,
+      canPrune: false,
+    });
     assert.deepEqual(plan, { promotions: [], deletions: [] });
   });
 
@@ -352,7 +359,14 @@ describe('pending transactions (prefix, filtering, reconciliation)', () => {
       { id: 'row-active', imported_id: 'pending:still-pending', date: '2024-03-15', amount: -500 },
       { id: 'row-vanished', imported_id: 'pending:old-pending-id', date: '2024-03-14', amount: -1500 },
     ];
-    const plan = planPendingReconciliation('deterministic', booked, activePending, existing, false, true);
+    const plan = planPendingReconciliation({
+      mode: 'deterministic',
+      bookedTxns: booked,
+      pendingTxns: activePending,
+      existing,
+      isCard: false,
+      canPrune: true,
+    });
     assert.deepEqual(plan.promotions, [{ id: 'row-match', imported_id: 's1' }]);
     assert.deepEqual(plan.deletions, ['row-vanished']);
   });
@@ -372,7 +386,14 @@ describe('pending transactions (prefix, filtering, reconciliation)', () => {
       { id: 'row-coffee', imported_id: 'pending:p-coffee', date: '2024-03-15', amount: -500 },
       { id: 'row-late', imported_id: 'pending:p-late', date: '2024-03-15', amount: -9900 },
     ];
-    const plan = planPendingReconciliation('heuristic', booked, [], existing, false, true);
+    const plan = planPendingReconciliation({
+      mode: 'heuristic',
+      bookedTxns: booked,
+      pendingTxns: [],
+      existing,
+      isCard: false,
+      canPrune: true,
+    });
     assert.deepEqual(plan.promotions, [{ id: 'row-single', imported_id: 'b-single' }]);
     assert.deepEqual(plan.deletions.sort(), ['row-coffee', 'row-late']);
   });
@@ -384,7 +405,14 @@ describe('pending transactions (prefix, filtering, reconciliation)', () => {
     const existing = [
       { id: 'row-card-pending', imported_id: 'pending:card-pend-1', date: '2024-03-15', amount: -2500 },
     ];
-    const plan = planPendingReconciliation('heuristic', booked, [], existing, true, true);
+    const plan = planPendingReconciliation({
+      mode: 'heuristic',
+      bookedTxns: booked,
+      pendingTxns: [],
+      existing,
+      isCard: true,
+      canPrune: true,
+    });
     assert.deepEqual(plan.promotions, [{ id: 'row-card-pending', imported_id: 'card-booked-1' }]);
     assert.deepEqual(plan.deletions, []);
   });

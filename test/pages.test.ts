@@ -162,7 +162,10 @@ describe('pairingPage budgets', () => {
     for (const name of ['map_tl1__default', 'map_tl1__budget_2', 'map_tl2__default', 'map_tl2__budget_2']) {
       assert.ok(html.includes(`<select name="${name}"`), name);
     }
-    assert.equal((html.match(/<select /g) ?? []).length, 4);
+    for (const name of ['pending_tl1', 'pending_tl2']) {
+      assert.ok(html.includes(`<select name="${name}"`), name);
+    }
+    assert.equal((html.match(/<select /g) ?? []).length, 6);
     assert.ok(html.includes('— not synced —'));
     assert.equal(html.includes('Joint <b>'), false);
   });
@@ -179,7 +182,7 @@ describe('pairingPage budgets', () => {
 
   it('hides the budget label when only one budget is shown', () => {
     const html = pairingPage({ ...base, budgetAccounts: [budgetAccounts[0]] });
-    assert.equal((html.match(/<select /g) ?? []).length, 2);
+    assert.equal((html.match(/<select /g) ?? []).length, 4);
     assert.equal(html.includes('<span>Default</span>'), false);
   });
 

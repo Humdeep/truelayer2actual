@@ -1,5 +1,5 @@
 import type { ActualAccount } from '../clients/actual.js';
-import type { Budget } from '../config.js';
+import type { Budget, PendingMode } from '../config.js';
 import type { PairingItem } from './oauth.js';
 
 export function escapeHtml(value: string): string {
