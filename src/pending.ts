@@ -32,8 +32,8 @@ export function isPendingMode(value: unknown): value is PendingMode {
 
 let pendingPath: string | null = null;
 
-export function setPendingPathForTests(p: string): void {
-  pendingPath = p;
+export function setPendingPathForTests(p: string | null | undefined): void {
+  pendingPath = p ?? null;
 }
 
 function pendingPathResolve(): string {
@@ -179,10 +179,15 @@ export function stampPendingTransactions(pendingTxns: TrueLayerTransaction[]): T
   });
 }
 
+export interface ExistingPendingRow extends ExistingImport {
+  date?: string;
+  amount?: number;
+}
+
 export interface PendingReconciliationOptions {
   bookedTxns: TrueLayerTransaction[];
   pendingTxns: TrueLayerTransaction[];
-  existing: ExistingImport[];
+  existing: ExistingPendingRow[];
   mode: PendingMode;
   isCard?: boolean;
   /** Whether vanished pending rows may be deleted (false if pending fetch failed). */
@@ -230,7 +235,7 @@ export function planPendingReconciliation(
   const deletions: string[] = [];
 
   const pendingRows = existing.filter(
-    (r): r is ExistingImport & { imported_id: string } =>
+    (r): r is ExistingPendingRow & { imported_id: string } =>
       typeof r.imported_id === 'string' && r.imported_id.startsWith(PENDING_PREFIX)
   );
   if (pendingRows.length === 0) return { promotions, deletions };
@@ -247,7 +252,7 @@ export function planPendingReconciliation(
     activeRawIds.add(p.transaction_id);
   }
 
-  const vanishedRows: (ExistingImport & { imported_id: string })[] = [];
+  const vanishedRows: (ExistingPendingRow & { imported_id: string })[] = [];
   for (const row of pendingRows) {
     const rawId = row.imported_id.slice(PENDING_PREFIX.length);
     if (mode !== 'off' && activeRawIds.has(rawId)) {
