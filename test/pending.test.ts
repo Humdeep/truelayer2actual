@@ -1,8 +1,10 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import http from 'http';
 import os from 'os';
 import path from 'path';
+import { once } from 'events';
 import axios from 'axios';
 import { createRequire } from 'module';
 
@@ -502,5 +504,108 @@ describe('pending sync hooks', () => {
     assert.equal(get.mock.callCount(), 0);
     assert.deepEqual(actualMock.deletes, ['row-p']);
     assert.deepEqual(all, booked);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: real Express app (createApp) end-to-end routes
+// ---------------------------------------------------------------------------
+
+describe('pending middleware integration with real createApp()', () => {
+  let tmpDir: string;
+  let server: http.Server;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tl2a-pending-http-'));
+    setPendingPathForTests(path.join(tmpDir, 'pending.json'));
+    setConfigPathForTests(path.join(tmpDir, 'config.json'));
+    setTokensPathForTests(path.join(tmpDir, 'tokens.json'));
+    delete process.env.ACTUAL_SYNC_ID;
+
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.json'),
+      JSON.stringify({
+        budgets: [{ id: 'b1', name: 'Personal', syncId: 's1' }],
+        accounts: [
+          {
+            name: 'Current',
+            connectionId: 'c1',
+            budgetId: 'b1',
+            accountKind: 'account',
+            truelayerAccountId: 'tlA',
+            actualAccountId: 'a1',
+            currency: 'GBP',
+          },
+        ],
+        createdAt: '2026-01-01T00:00:00Z',
+      })
+    );
+    await saveConnection('c1', {
+      accessToken: 'tok',
+      refreshToken: 'ref',
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      providerId: 'mock',
+      providerDisplayName: 'Monzo',
+    });
+
+    server = createApp().listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const addr = server.address() as { port: number };
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    setPendingPathForTests(undefined);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('POST /connections/:id/pairings updates pending.json and POST /connections/:id/delete prunes it', async () => {
+    const editRes = await fetch(`${baseUrl}/connections/c1/pairings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ map_tlA__b1: 'a1', pending_tlA: 'heuristic' }),
+      redirect: 'manual',
+    });
+    assert.equal(editRes.status, 302);
+    assert.deepEqual(loadPendingModes(), { tlA: 'heuristic' });
+
+    const delRes = await fetch(`${baseUrl}/connections/c1/delete`, {
+      method: 'POST',
+      redirect: 'manual',
+    });
+    assert.equal(delRes.status, 302);
+    assert.deepEqual(loadPendingModes(), {});
+  });
+
+  it('POST /pair saves pending mode for a valid pairing session and ignores expired sessions', async () => {
+    const badRes = await fetch(`${baseUrl}/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ pairingId: 'missing', pending_tlB: 'heuristic' }),
+      redirect: 'manual',
+    });
+    assert.equal(badRes.status, 400);
+    assert.deepEqual(loadPendingModes(), {});
+
+    const pairingId = setPairing({
+      connectionId: 'c2',
+      mode: 'new',
+      provider: 'Starling',
+      items: [{ truelayerAccountId: 'tlB', name: 'Joint', accountKind: 'account', currency: 'GBP' }],
+    });
+    const okRes = await fetch(`${baseUrl}/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        pairingId,
+        map_tlB__b1: 'a2',
+        pending_tlB: 'deterministic',
+      }),
+      redirect: 'manual',
+    });
+    assert.equal(okRes.status, 302);
+    assert.deepEqual(loadPendingModes(), { tlB: 'deterministic' });
   });
 });
