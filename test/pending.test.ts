@@ -62,7 +62,9 @@ const {
 } = await import('../src/pending.js');
 const { pairingPage, editPairingsPage } = await import('../src/web/pages.js');
 const { setConfigPathForTests } = await import('../src/config.js');
+const { setTokensPathForTests, saveConnection } = await import('../src/auth/tokens.js');
 const { setPairing } = await import('../src/web/oauth.js');
+const { createApp } = await import('../src/web/server.js');
 
 import type { TrueLayerTransaction } from '../src/clients/truelayer.js';
 import type { Express } from 'express';
