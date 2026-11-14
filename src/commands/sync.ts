@@ -34,6 +34,7 @@ import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
 import { logger } from '../logger.js';
+import { fetchPendingForItem, applyPendingSync } from '../pending.js';
 import type { Account, Budget, Config } from '../config.js';
 
 /** Prevents two full syncs from overlapping (token rotation, double import). */
@@ -394,6 +395,7 @@ async function executeFetchPlan(
       continue;
     }
     logger.info(`[${item.name}] Fetched ${txns.length} transaction(s)`);
+    await fetchPendingForItem(accessToken, item);
 
     let balance: TrueLayerBalance | undefined;
     try {
@@ -428,9 +430,10 @@ async function syncAccount(
     logger.info(`[${label}] Syncing ${txns.length} transaction(s) (window from ${from})...`);
 
     await migrateImportedIds(account, label, txns, from, to);
+    const allTxns = await applyPendingSync(account, label, txns, from, to);
 
     const isCard = account.accountKind === 'card';
-    const mapped = txns.map((t) => mapTransaction(t, isCard));
+    const mapped = allTxns.map((t) => mapTransaction(t, isCard));
     const result = await importToActual(account.actualAccountId, mapped);
 
     logger.info(`[${label}] +${result.added.length} added, ${result.updated.length} updated`);

@@ -58,6 +58,7 @@ import {
 } from './pages.js';
 import { withStateLock } from '../util/lock.js';
 import { logger } from '../logger.js';
+import { installPendingMiddleware } from '../pending.js';
 
 function asyncHandler(
   fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>
@@ -443,6 +444,8 @@ export function createApp(): Express {
     }
     next();
   });
+
+  installPendingMiddleware(app);
 
   app.get(
     '/',
