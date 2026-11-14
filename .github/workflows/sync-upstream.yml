@@ -8,9 +8,7 @@ on:
 
 permissions:
   contents: write
-  packages: write
-  attestations: write
-  id-token: write
+  actions: write
 
 jobs:
   sync:
@@ -62,7 +60,11 @@ jobs:
         if: steps.merge.outputs.updated == 'true'
         run: git push origin HEAD:main
 
-  publish:
-    needs: sync
-    if: needs.sync.outputs.updated == 'true'
-    uses: ./.github/workflows/publish.yml
+      # Pushes made with GITHUB_TOKEN don't trigger other workflows, so start
+      # the image build explicitly. Dispatching on main makes it build the
+      # commit just pushed (a reusable-workflow call would build the old SHA).
+      - name: Publish Docker image
+        if: steps.merge.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run publish.yml --ref main --repo "$GITHUB_REPOSITORY"

@@ -1,12 +1,18 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import axios from 'axios';
 import { createRequire } from 'module';
 
 // Mock @actual-app/api before importing modules that transitively load it.
 const mockAmountToInteger = (n: number): number => Math.round(n * 100);
+const actualMock = {
+  existing: [] as { id: string; imported_id?: string; date?: string; amount?: number }[],
+  updates: [] as { id: string; fields: Record<string, unknown> }[],
+  deletes: [] as string[],
+};
 const require = createRequire(import.meta.url);
 try {
   const resolvedApiPath = require.resolve('@actual-app/api');
@@ -21,6 +27,13 @@ try {
     exports: {
       utils: {
         amountToInteger: mockAmountToInteger,
+      },
+      getTransactions: async () => actualMock.existing,
+      updateTransaction: async (id: string, fields: Record<string, unknown>) => {
+        actualMock.updates.push({ id, fields });
+      },
+      deleteTransaction: async (id: string) => {
+        actualMock.deletes.push(id);
       },
     },
   } as unknown as NodeJS.Module;
@@ -41,10 +54,16 @@ const {
   loadPendingModes,
   updatePendingModes,
   pendingModeOf,
+  installPendingMiddleware,
+  fetchPendingForItem,
+  applyPendingSync,
 } = await import('../src/pending.js');
 const { pairingPage, editPairingsPage } = await import('../src/web/pages.js');
+const { setConfigPathForTests } = await import('../src/config.js');
+const { setPairing } = await import('../src/web/oauth.js');
 
 import type { TrueLayerTransaction } from '../src/clients/truelayer.js';
+import type { Express } from 'express';
 
 function makeTransaction(
   overrides: Partial<TrueLayerTransaction> = {}
@@ -259,5 +278,229 @@ describe('pending sidecar storage and HTML middleware injection', () => {
     );
     assert.match(pairHtml, /<th>Pending<\/th>/);
     assert.match(pairHtml, /name="pending_tl2" value="off" checked/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Middleware: saving pending modes alongside the upstream pairing routes
+// ---------------------------------------------------------------------------
+
+type Handler = (req: unknown, res: unknown, next: () => void) => void;
+
+function captureMiddleware(): Handler {
+  let handler: Handler | undefined;
+  installPendingMiddleware({ use: (fn: Handler) => (handler = fn) } as unknown as Express);
+  return handler!;
+}
+
+/** Run the middleware, then let the "route" respond via `respond(res)`. */
+async function runPost(
+  handler: Handler,
+  reqPath: string,
+  body: Record<string, unknown>,
+  respond: (res: { redirect: (url: string) => void; send: (b: string) => void }) => void
+): Promise<{ redirectedTo?: string; sent?: string }> {
+  const out: { redirectedTo?: string; sent?: string } = {};
+  let done!: () => void;
+  const finished = new Promise<void>((r) => (done = r));
+  const res = {
+    redirect: (url: string) => {
+      out.redirectedTo = url;
+      done();
+    },
+    send: (b: string) => {
+      out.sent = b;
+      done();
+    },
+  };
+  handler({ method: 'POST', path: reqPath, body }, res, () => respond(res));
+  await finished;
+  return out;
+}
+
+describe('pending middleware', () => {
+  let tmpDir: string;
+  const handler = captureMiddleware();
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tl2a-pending-mw-'));
+    setPendingPathForTests(path.join(tmpDir, 'pending.json'));
+    setConfigPathForTests(path.join(tmpDir, 'config.json'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'config.json'),
+      JSON.stringify({
+        budgets: [{ id: 'b1', name: 'Personal', syncId: 's1' }],
+        accounts: [
+          { name: 'A', connectionId: 'c1', budgetId: 'b1', accountKind: 'account', truelayerAccountId: 'tlA', actualAccountId: 'a1', currency: 'GBP' },
+          { name: 'O', connectionId: 'c2', budgetId: 'b1', accountKind: 'account', truelayerAccountId: 'tlOther', actualAccountId: 'a2', currency: 'GBP' },
+        ],
+        createdAt: '2026-01-01T00:00:00Z',
+      })
+    );
+  });
+
+  afterEach(() => {
+    setPendingPathForTests(undefined);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('saves after a successful edit, only for accounts on that connection', async () => {
+    const out = await runPost(
+      handler,
+      '/connections/c1/pairings',
+      { pending_tlA: 'heuristic', pending_tlOther: 'deterministic' },
+      (res) => res.redirect('/connections/c1/pairings?msg=ok')
+    );
+    assert.equal(out.redirectedTo, '/connections/c1/pairings?msg=ok');
+    assert.deepEqual(loadPendingModes(), { tlA: 'heuristic' });
+  });
+
+  it('does not save when the route fails (error redirect or 4xx page)', async () => {
+    await runPost(handler, '/connections/c1/pairings', { pending_tlA: 'heuristic' }, (res) =>
+      res.redirect('/?err=boom')
+    );
+    await runPost(handler, '/connections/nope/pairings', { pending_tlA: 'heuristic' }, (res) =>
+      res.send('Unknown connection')
+    );
+    assert.deepEqual(loadPendingModes(), {});
+  });
+
+  it('POST /pair saves only for accounts in a valid pairing session', async () => {
+    const pairingId = setPairing({
+      connectionId: 'c1',
+      mode: 'new',
+      provider: 'Test',
+      items: [{ truelayerAccountId: 'tlA', name: 'A', accountKind: 'account', currency: 'GBP' }],
+    });
+    await runPost(
+      handler,
+      '/pair',
+      { pairingId, pending_tlA: 'deterministic', pending_tlOther: 'heuristic' },
+      (res) => res.redirect('/?msg=saved')
+    );
+    assert.deepEqual(loadPendingModes(), { tlA: 'deterministic' });
+
+    await runPost(handler, '/pair', { pairingId: 'expired', pending_tlA: 'heuristic' }, (res) =>
+      res.redirect('/?msg=saved')
+    );
+    assert.deepEqual(loadPendingModes(), { tlA: 'deterministic' });
+  });
+
+  it('drops modes for accounts that are no longer paired after a connection is deleted', async () => {
+    await updatePendingModes(new Map([['tlA', 'heuristic'], ['tlGone', 'heuristic']]));
+    await runPost(handler, '/connections/c9/delete', {}, (res) => res.redirect('/?msg=deleted'));
+    assert.deepEqual(loadPendingModes(), { tlA: 'heuristic' });
+  });
+
+  it('injects the column into pairing pages via res.send, using the account name for the label', () => {
+    let sent = '';
+    const res = { send: (b: string) => (sent = b) };
+    handler({ method: 'GET', path: '/connections/c1/pairings', body: {} }, res, () => {
+      (res.send as (b: string) => void)(
+        editPairingsPage({
+          connectionId: 'c1',
+          provider: 'Monzo',
+          budgetAccounts: [
+            {
+              budget: { id: 'b1', name: 'Personal', syncId: 's1' },
+              accounts: [{ id: 'a1', name: 'Current', offbudget: false, closed: false }],
+            },
+            {
+              budget: { id: 'b2', name: 'Joint', syncId: 's2' },
+              accounts: [{ id: 'a9', name: 'Joint', offbudget: false, closed: false }],
+            },
+          ],
+          rows: [
+            { truelayerAccountId: 'tlA', name: 'My Bank', accountKind: 'account', currency: 'GBP', targets: { b1: 'a1' } },
+          ],
+        })
+      );
+    });
+    assert.match(sent, /<th>Pending<\/th>/);
+    assert.equal((sent.match(/name="pending_tlA"/g) ?? []).length, 3);
+    assert.match(sent, /aria-label="Pending transactions for My Bank"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end sync hook: fetch pending → reconcile in Actual → rows to import
+// ---------------------------------------------------------------------------
+
+describe('pending sync hooks', () => {
+  let tmpDir: string;
+  const account = {
+    name: 'Current',
+    connectionId: 'c1',
+    budgetId: 'b1',
+    accountKind: 'account' as const,
+    truelayerAccountId: 'tlA',
+    actualAccountId: 'actual-1',
+    currency: 'GBP',
+  };
+  const item = { ...account, from: '2024-03-10', to: '2024-03-20' };
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tl2a-pending-sync-'));
+    setPendingPathForTests(path.join(tmpDir, 'pending.json'));
+    actualMock.existing = [];
+    actualMock.updates = [];
+    actualMock.deletes = [];
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+    setPendingPathForTests(undefined);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('promotes a settled pending row (marking it cleared), deletes a vanished one, and imports still-pending ones', async () => {
+    await updatePendingModes(new Map([['tlA', 'deterministic']]));
+    mock.method(axios, 'get', async () => ({
+      data: { results: [makeTransaction({ transaction_id: 'still', amount: -3 })] },
+    }));
+    actualMock.existing = [
+      { id: 'row-settled', imported_id: 'pending:s1', date: '2024-03-14', amount: -1250 },
+      { id: 'row-gone', imported_id: 'pending:gone', date: '2024-03-14', amount: -999 },
+      { id: 'row-still', imported_id: 'pending:still', date: '2024-03-15', amount: -300 },
+    ];
+    const booked = [makeTransaction({ transaction_id: 'tl-new', normalised_provider_transaction_id: 's1' })];
+
+    await fetchPendingForItem('token', item);
+    const all = await applyPendingSync(account, 'Current', booked, item.from, item.to);
+
+    assert.deepEqual(actualMock.updates, [{ id: 'row-settled', fields: { imported_id: 's1', cleared: true } }]);
+    assert.deepEqual(actualMock.deletes, ['row-gone']);
+    const mapped = all.map((t) => mapTransaction(t));
+    assert.deepEqual(
+      mapped.map((m) => [m.imported_id, m.cleared]),
+      [['s1', true], ['pending:still', false]]
+    );
+  });
+
+  it('never deletes pending rows when the pending fetch failed', async () => {
+    await updatePendingModes(new Map([['tlA', 'heuristic']]));
+    mock.method(axios, 'get', async () => {
+      throw new Error('timeout');
+    });
+    actualMock.existing = [{ id: 'row-p', imported_id: 'pending:p1', date: '2024-03-14', amount: -500 }];
+
+    await fetchPendingForItem('token', item);
+    const all = await applyPendingSync(account, 'Current', [], item.from, item.to);
+
+    assert.deepEqual(actualMock.deletes, []);
+    assert.deepEqual(all, []);
+  });
+
+  it('mode off: does not call TrueLayer, and cleans up leftover pending rows', async () => {
+    const get = mock.method(axios, 'get', async () => ({ data: { results: [] } }));
+    actualMock.existing = [{ id: 'row-p', imported_id: 'pending:p1', date: '2024-03-14', amount: -500 }];
+
+    await fetchPendingForItem('token', item);
+    const booked = [makeTransaction({ transaction_id: 'b1' })];
+    const all = await applyPendingSync(account, 'Current', booked, item.from, item.to);
+
+    assert.equal(get.mock.callCount(), 0);
+    assert.deepEqual(actualMock.deletes, ['row-p']);
+    assert.deepEqual(all, booked);
   });
 });

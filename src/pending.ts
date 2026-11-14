@@ -3,11 +3,12 @@ import path from 'path';
 import axios from 'axios';
 import { createRequire } from 'module';
 import type { Express, Request, Response, NextFunction } from 'express';
-import { isSandbox } from './auth/oauth.js';
-import type { TrueLayerTransaction } from './clients/truelayer.js';
+import { apiBaseUrl, type TrueLayerTransaction } from './clients/truelayer.js';
 import type { ExistingImport, ImportedIdMigration } from './mapper.js';
-import type { Account } from './config.js';
+import { loadConfigIfExists, type Account } from './config.js';
+import { getPairingSession } from './web/oauth.js';
 import { atomicWriteFile } from './util/fs.js';
+import { HTTP_TIMEOUT_MS } from './util/http.js';
 import { withStateLock } from './util/lock.js';
 import { describeError } from './util/errors.js';
 import { logger } from './logger.js';
@@ -59,11 +60,16 @@ export function loadPendingModes(): Record<string, PendingMode> {
   }
 }
 
+/**
+ * Apply mode changes. When `keep` is given, entries for bank accounts not in
+ * it (unpaired or deleted connections) are dropped so the file can't go stale.
+ */
 export async function updatePendingModes(
-  updates: Map<string, PendingMode> | Record<string, PendingMode>
+  updates: Map<string, PendingMode> | Record<string, PendingMode>,
+  keep?: Set<string>
 ): Promise<Record<string, PendingMode>> {
   const entries = updates instanceof Map ? [...updates.entries()] : Object.entries(updates);
-  if (entries.length === 0) return loadPendingModes();
+  if (entries.length === 0 && !keep) return loadPendingModes();
 
   return withStateLock(async () => {
     const modes = loadPendingModes();
@@ -72,9 +78,12 @@ export async function updatePendingModes(
       if (mode === 'off') delete modes[tlId];
       else modes[tlId] = mode;
     }
+    if (keep) {
+      for (const tlId of Object.keys(modes)) if (!keep.has(tlId)) delete modes[tlId];
+    }
     const filePath = pendingPathResolve();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    atomicWriteFile(filePath, JSON.stringify({ modes }, null, 2));
+    atomicWriteFile(filePath, JSON.stringify({ modes }, null, 2) + '\n', { mode: 0o600 });
     return modes;
   });
 }
@@ -98,10 +107,6 @@ export function pendingModeOf(
 // TrueLayer pending endpoints
 // ---------------------------------------------------------------------------
 
-function truelayerBaseUrl(): string {
-  return isSandbox() ? 'https://api.truelayer-sandbox.com' : 'https://api.truelayer.com';
-}
-
 export async function fetchPendingTransactions(
   accessToken: string,
   accountId: string,
@@ -110,13 +115,16 @@ export async function fetchPendingTransactions(
   isCard = false
 ): Promise<TrueLayerTransaction[]> {
   const kindPath = isCard ? 'cards' : 'accounts';
-  const url = `${truelayerBaseUrl()}/data/v1/${kindPath}/${accountId}/transactions/pending`;
+  const url = `${apiBaseUrl()}/data/v1/${kindPath}/${encodeURIComponent(accountId)}/transactions/pending`;
   logger.debug(`Fetching pending ${kindPath} transactions for ${accountId} from ${from} to ${to}`);
 
   try {
+    // Same timeout as every other TrueLayer call, so a hung endpoint can never
+    // hold the sync lock indefinitely.
     const res = await axios.get<{ results: TrueLayerTransaction[] }>(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
       params: { from, to },
+      timeout: HTTP_TIMEOUT_MS,
     });
     const list = res.data?.results ?? [];
     logger.debug(`Fetched ${list.length} pending transaction(s) for ${accountId}`);
@@ -350,9 +358,17 @@ export function planPendingReconciliation(
 interface CachedPendingFetch {
   pendingTxns: TrueLayerTransaction[];
   pendingFetched: boolean;
+  fetchedAt: number;
 }
 
 const fetchedPendingCache = new Map<string, CachedPendingFetch>();
+
+/**
+ * A cache entry only counts for the sync run that produced it. Anything older
+ * is treated as "not fetched", so a stale list can never cause pending rows to
+ * be pruned or re-imported.
+ */
+const CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 
 function cacheKey(item: { connectionId: string; truelayerAccountId: string }): string {
   return `${item.connectionId}__${item.truelayerAccountId}`;
@@ -371,10 +387,8 @@ export async function fetchPendingForItem(
 ): Promise<void> {
   const mode = pendingModeOf({ truelayerAccountId: item.truelayerAccountId });
   const key = cacheKey(item);
-  if (mode === 'off') {
-    fetchedPendingCache.delete(key);
-    return;
-  }
+  fetchedPendingCache.delete(key);
+  if (mode === 'off') return;
   try {
     const pendingTxns = await fetchPendingTransactions(
       accessToken,
@@ -384,13 +398,13 @@ export async function fetchPendingForItem(
       item.accountKind === 'card'
     );
     logger.info(`[${item.name}] Fetched ${pendingTxns.length} pending transaction(s)`);
-    fetchedPendingCache.set(key, { pendingTxns, pendingFetched: true });
+    fetchedPendingCache.set(key, { pendingTxns, pendingFetched: true, fetchedAt: Date.now() });
   } catch (err) {
     logger.warn(
       `[${item.name}] Could not fetch pending transactions (continuing with booked only):`,
       describeError(err)
     );
-    fetchedPendingCache.set(key, { pendingTxns: [], pendingFetched: false });
+    fetchedPendingCache.set(key, { pendingTxns: [], pendingFetched: false, fetchedAt: Date.now() });
   }
 }
 
@@ -408,10 +422,11 @@ export async function applyPendingSync(
   to: string
 ): Promise<TrueLayerTransaction[]> {
   const mode = pendingModeOf(account);
-  const cached = fetchedPendingCache.get(cacheKey(account)) ?? {
-    pendingTxns: [],
-    pendingFetched: false,
-  };
+  const entry = fetchedPendingCache.get(cacheKey(account));
+  const cached =
+    entry && Date.now() - entry.fetchedAt <= CACHE_MAX_AGE_MS
+      ? entry
+      : { pendingTxns: [], pendingFetched: false };
   const activePending =
     mode === 'off' ? [] : filterPendingTransactions(bookedTxns, cached.pendingTxns);
 
@@ -421,8 +436,11 @@ export async function applyPendingSync(
         accountId: string,
         from: string,
         to: string
-      ) => Promise<ExistingImport[]>;
-      updateTransaction?: (id: string, fields: { imported_id: string }) => Promise<void>;
+      ) => Promise<ExistingPendingRow[]>;
+      updateTransaction?: (
+        id: string,
+        fields: { imported_id: string; cleared?: boolean }
+      ) => Promise<void>;
       deleteTransaction?: (id: string) => Promise<void>;
     };
 
@@ -442,7 +460,9 @@ export async function applyPendingSync(
       });
       if (api.updateTransaction) {
         for (const m of plan.promotions) {
-          await api.updateTransaction(m.id, { imported_id: m.imported_id });
+          // Set cleared explicitly: the import below matches on imported_id
+          // and is not guaranteed to flip cleared on an existing row.
+          await api.updateTransaction(m.id, { imported_id: m.imported_id, cleared: true });
         }
       }
       if (api.deleteTransaction) {
@@ -527,51 +547,113 @@ export function parsePendingFields(
   return out;
 }
 
+function unescapeHtml(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+const PAIRING_THEAD = '<thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>';
+
 /**
  * Injects the Pending column into pairing / edit-pairings HTML tables so
- * `src/web/pages.ts` does not need to be modified at all.
+ * `src/web/pages.ts` does not need to be modified at all. Rows without an
+ * account `<select>` (e.g. no budgets configured yet) get a placeholder:
+ * a pending mode is meaningless until the account is synced somewhere.
  */
 export function injectPendingColumnHtml(
   html: string,
   modes: Record<string, PendingMode> = loadPendingModes()
 ): string {
-  if (!html.includes('<thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>')) {
-    return html;
-  }
+  if (!html.includes(PAIRING_THEAD)) return html;
   const withHeader = html.replace(
-    '<thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>',
+    PAIRING_THEAD,
     '<thead><tr><th>TrueLayer</th><th>Actual account</th><th>Pending</th></tr></thead>'
   );
   return withHeader.replace(/<tr>([\s\S]*?)<\/tr>/g, (fullRow, inner: string) => {
     if (inner.includes('<th>')) return fullRow;
-    const match = inner.match(/name="map_([^"]+?)(?:__[^"]+)"/);
+    // Field names are `map_<tlId>__<budgetId>`, split on the FIRST `__`,
+    // matching parseTargetFields in src/web/server.ts.
+    const match = inner.match(/name="map_([^"]+?)__[^"]+"/);
     if (!match) {
       return `<tr>${inner}<td><span class="muted">—</span></td></tr>`;
     }
-    const rawTlId = match[1]
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&');
+    const rawTlId = unescapeHtml(match[1]);
+    const nameMatch = inner.match(/<td>([^<]*)/);
+    const accountName = nameMatch && nameMatch[1].trim() ? unescapeHtml(nameMatch[1].trim()) : rawTlId;
     const mode = modes[rawTlId] ?? 'off';
-    return `<tr>${inner}<td>${renderPendingControls(rawTlId, rawTlId, mode)}</td></tr>`;
+    return `<tr>${inner}<td>${renderPendingControls(rawTlId, accountName, mode)}</td></tr>`;
   });
 }
 
+/**
+ * Save submitted modes once the upstream route has succeeded. Only bank
+ * accounts in `scope` may change, and modes for accounts that are no longer
+ * paired anywhere are dropped. A corrupt config leaves pending.json alone.
+ */
+export async function persistPendingAfterSave(
+  updates: Map<string, PendingMode>,
+  scope: { sessionIds?: Set<string>; connectionId?: string }
+): Promise<void> {
+  let config: Awaited<ReturnType<typeof loadConfigIfExists>>;
+  try {
+    config = await loadConfigIfExists();
+  } catch (err) {
+    logger.warn('Not updating pending.json (config.json unreadable):', describeError(err));
+    return;
+  }
+  const accounts = config?.accounts ?? [];
+  const paired = new Set(accounts.map((a) => a.truelayerAccountId));
+  const allowed =
+    scope.sessionIds ??
+    new Set(
+      accounts.filter((a) => a.connectionId === scope.connectionId).map((a) => a.truelayerAccountId)
+    );
+  const filtered = new Map([...updates].filter(([tlId]) => allowed.has(tlId)));
+  await updatePendingModes(filtered, paired);
+}
+
+type RedirectFn = (...args: unknown[]) => void;
+
 export function installPendingMiddleware(app: Express): void {
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const isPairingPost =
-      req.method === 'POST' &&
-      (req.path === '/pair' || /^\/connections\/[^/]+\/pairings$/.test(req.path));
-    if (isPairingPost) {
-      const parsed = parsePendingFields(req.body as Record<string, unknown> | undefined);
-      if (parsed.size > 0) {
-        updatePendingModes(parsed).then(
-          () => next(),
-          (err) => next(err)
-        );
-        return;
+    if (req.method === 'POST') {
+      const connMatch = req.path.match(/^\/connections\/([^/]+)\/(pairings|delete)$/);
+      if (req.path === '/pair' || connMatch) {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const updates = parsePendingFields(body);
+        let scope: { sessionIds?: Set<string>; connectionId?: string };
+        if (connMatch) {
+          let connectionId = connMatch[1];
+          try {
+            connectionId = decodeURIComponent(connectionId);
+          } catch {
+            // keep the raw segment; it simply won't match any account
+          }
+          scope = { connectionId };
+        } else {
+          // Capture the session now: saving the pairings consumes it.
+          const pairingId = typeof body.pairingId === 'string' ? body.pairingId : '';
+          const session = pairingId ? getPairingSession(pairingId) : undefined;
+          scope = { sessionIds: new Set(session?.items.map((i) => i.truelayerAccountId) ?? []) };
+        }
+
+        // Upstream routes redirect on success and send 4xx pages (or redirect
+        // with ?err=) on failure, so only persist on a non-error redirect.
+        const origRedirect = res.redirect.bind(res) as RedirectFn;
+        res.redirect = ((...args: unknown[]) => {
+          const url = String(args.length > 1 ? args[1] : args[0]);
+          if (/[?&]err=/.test(url)) {
+            origRedirect(...args);
+            return;
+          }
+          persistPendingAfterSave(updates, scope)
+            .catch((err) => logger.warn('Could not save pending modes:', describeError(err)))
+            .finally(() => origRedirect(...args));
+        }) as unknown as Response['redirect'];
       }
     }
 
